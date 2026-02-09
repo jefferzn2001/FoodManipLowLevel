@@ -113,7 +113,7 @@ def get_yam_robot(
         motor_chain=motor_chain,
         xml_path=model_path,
         use_gravity_comp=True,
-        gravity_comp_factor=1.3,
+        gravity_comp_factor=1.2,
         joint_limits=joint_limits,
         kp=kp,
         kd=kd,

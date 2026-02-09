@@ -5,6 +5,7 @@ __pycache__/
 
 # Virtual environment
 venv/
+.venv/
 env/
 
 # Distribution / packaging
@@ -89,3 +90,6 @@ i2rt.egg-info/
 
 # Ignore temporary scripts or generated files
 scripts/temp_*/
+
+# Camera calibration images
+camcal/

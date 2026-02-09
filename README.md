@@ -1,43 +1,33 @@
-# I2RT Python API
+# FoodManipLowLevel
 
-A Python client library for interacting with [I2RT](https://i2rt.com/) products, designed with simplicity and extensibility in mind.
+Bimanual food manipulation low-level control stack. Built on top of [I2RT](https://i2rt.com/) YAM robot arms with [LeRobot](https://github.com/huggingface/lerobot) integration.
 
-[![I2RT](https://github.com/user-attachments/assets/025ac3f0-7af1-4e6f-ab9f-7658c5978f92)](https://i2rt.com/)
-## Features
+## Hardware Setup
 
-- Plug and play python interface for I2RT robots
-- Real-time robot control via CAN bus communication
-- Support for directly communicating with motor (DM series motors)
-- Visualization and gravity compensation using MuJoCo physics engine
-- Gripper force control mode and auto calibration
+- **2× Leader arms** (YAM + teaching handle) — for teleoperation input
+- **2× Follower arms** (YAM + crank_4310 gripper) — for manipulation
+- **4× CANable USB-CAN adapters** — one per arm
 
-## Examples
+Arm-to-CAN mapping is defined in [`config/leader_arms.yaml`](./config/leader_arms.yaml) by USB serial number, so CAN channel names (can0, can1, …) are resolved automatically at runtime regardless of plug order.
 
-We are continuously expanding our collection of examples with detailed documentation under [`examples/`](./examples). These examples are designed to help you get started quickly and demonstrate common use cases.
+## Clone & Install (for a new machine)
 
-## Examples
+### 1. Clone with lerobot submodule
 
-Quick-start demos available under [`examples/`](./examples):
-
-- [Bimanual Lead Follower](./examples/bimanual_lead_follower/README.md) — coordinated dual-arm control
-- [Record Replay Trajectory](./examples/record_replay_trajectory/README.md) — record & replay motions
-- [Single Motor PD Control](./examples/single_motor_position_pd_control/README.md) — basic motor PD
-
-## Contributing
-
-If you have suggestions for new examples or want to contribute your own, feel free to:
-- Open an issue to request specific examples
-- Submit a pr with your contribution
-- Share feedback on existing examples
-
-We welcome community contributions that help others learn and implement robotic solutions!
-
-## Installation
-
-### Install uv from scratch
-
+```bash
+git clone --recurse-submodules git@github.com:jefferzn2001/FoodManipLowLevel.git
+cd FoodManipLowLevel
 ```
-git clone https://github.com/i2rt-robotics/i2rt.git && cd i2rt
+
+If you already cloned without `--recurse-submodules`:
+
+```bash
+git submodule update --init --depth 1
+```
+
+### 2. Create the Python environment
+
+```bash
 curl -LsSf https://astral.sh/uv/install.sh | sh
 source $HOME/.local/bin/env
 uv venv --python 3.11
@@ -50,219 +40,180 @@ sudo apt install build-essential python3-dev linux-headers-$(uname -r)
 uv pip install -e .
 ```
 
-## Basic CAN Usage
-Plug in the CAN device and run the following command to check the available CAN devices.
+If pip is missing inside the venv:
+
 ```bash
-ls -l /sys/class/net/can*
+python -m ensurepip --upgrade
 ```
 
-This should give you something like this
+### 3. Install lerobot (optional, for policy training)
+
 ```bash
-lrwxrwxrwx 1 root root 0 Jul 15 14:35 /sys/class/net/can0 -> ../../devices/platform/soc/your_can_device/can0
+cd lerobot
+pip install -e .
+cd ..
 ```
 
-Where can0 is the CAN device name.
+### 4. Auto-start CAN interfaces on boot (one-time)
 
-You need to bring up the CAN interface with
 ```bash
-sudo ip link set can0 up type can bitrate 1000000
+sudo sh devices/install_devices.sh
 ```
 
-We have provided a convenience script to reset all CAN devices. Simply run
+This installs a udev rule to automatically bring up all `can*` interfaces at 1 Mbps on plug-in.
+
+## Quick Start
+
+### Bring up CAN interfaces (if not auto-started)
+
 ```bash
 sh scripts/reset_all_can.sh
 ```
 
-If you see this output after entering the can reset command, you may need to unplug/replug the usb can device to completely reset the canable.
+### Zero gravity mode (test a single arm)
+
 ```bash
-RTNETLINK answers: Device or resource busy
+# Both leader arms
+python scripts/zero_grav.py
+
+# Left leader only
+python scripts/zero_grav.py --arm Lleft
+
+# Right leader only
+python scripts/zero_grav.py --arm Lright
 ```
 
-If you want the CAN interface to be automatically enabled on startup, you can run:
+CAN channels and gripper types are auto-resolved from `config/leader_arms.yaml`.
+
+### Bimanual teleop (leader-follower)
+
 ```bash
-sudo sh devices/install_devices.sh
+# Both arm pairs (Lleft→Fleft + Lright→Fright)
+python scripts/teleop.py
+
+# Left pair only
+python scripts/teleop.py --left
+
+# Right pair only
+python scripts/teleop.py --right
+
+# Custom bilateral feedback strength
+python scripts/teleop.py --bilateral_kp 0.15
 ```
-This script installs a udev rule that will automatically bring up all CAN devices whose names start with can*.
 
-⚠️ Note: If you later set persistent CAN IDs with different names, you may need to adjust the udev rule accordingly.
+Press the **top button** on the teaching handle to toggle sync on/off. `bilateral_kp` controls how much the leader arm resists (recommended 0.1–0.2).
 
+### Camera calibration capture
 
-### See [set_persist_id_socket_can.md](doc/set_persist_id_socket_can.md) if you want to set persistent CAN device names
-
-## Gripper type
-
-Currently YAM supports Four different grippers:
-![YAM supported Grippers](./assets/photos/yam_grippers.png)
-
-| Gripper Name        | Description |
-|---------------------|-------------|
-| `crank_4310`        | Zero-linkage crank gripper, optimized for minimizing gripper width. |
-| `linear_3507`       | Linear gripper with smaller DM3507 motor. Lightweight, but requires calibration or starting with the gripper in the closed configuration. |
-| `linear_4310`       | Linear gripper with the standard DM4310 motor (not shown on photo above). Slightly heavier but can provide a bit more gripping force. |
-| `yam_teaching_handle`| Used for the leader arm setup. Includes a trigger to control the gripper and two customizable buttons that can be mapped to different functions. For more information related to the teaching handle, please see [yam_handle_readme.md](doc/yam_handle_readme.md)|
-
-The linear gripper requires an additional calibration step because its motor must rotate more than 2π radians to complete the full stroke.
-
-## Test YAM Zero Gravity mode
-
-This enables you to launch the robot in zero gravity mode:
 ```bash
-python i2rt/robots/motor_chain_robot.py --channel can0 --gripper_type $YOUR_GRIPPER_TYPE
+python scripts/camera.py
 ```
 
-## YAM Robot Arm Usage
-Default timeout is enabled for YAM motors. Please refer to [YAM configuration](#yam-configuration) for more details.
-### Getting started
-```python
-from i2rt.robots.motor_chain_robot import get_yam_robot
+SPACE to save a frame, ESC to quit. Images saved to `./camcal/`.
 
-# Get a robot instance
-robot = get_yam_robot(channel="can0", zero_gravity_mode=True)
+## Arm Configuration
 
-# Get the current joint positions
-joint_pos = robot.get_joint_pos()
+All arm CAN mappings and gripper types are in [`config/leader_arms.yaml`](./config/leader_arms.yaml):
 
-# Command the robot to move to a new joint position
-target_pos = np.array([0, 0, 0, 0, 0, 0, 0])
+```yaml
+leader_arms:
+  Lleft:
+    usb_serial: "canable.io_canable2_gs_usb_00330052594E501820313332"
+    gripper_type: "yam_teaching_handle"
+  Lright:
+    usb_serial: "canable.io_canable2_gs_usb_005F0056594E501820313332"
+    gripper_type: "yam_teaching_handle"
 
-# Command the robot to move to the target position
-robot.command_joint_pos(target_pos)
+follower_arms:
+  Fleft:
+    usb_serial: "canable.io_canable2_gs_usb_002A0064594E501820313332"
+    gripper_type: "crank_4310"
+  Fright:
+    usb_serial: "canable.io_canable2_gs_usb_004C0053594E501820313332"
+    gripper_type: "crank_4310"
 ```
 
-### Running the arm and visualizing it
-To launch the follower robot run.
+To find USB serials for new adapters:
+
 ```bash
-python scripts/minimum_gello.py --gripper $YOUR_FOLLOWER_ARM_GRIPPER --mode follower
+ls -l /sys/class/net/can*
+udevadm info -q property -p /sys/class/net/can0 | grep ID_SERIAL
 ```
 
-To launch the robot with mujoco visualizer run
+## Gripper Types
+
+| Gripper Name | Description |
+|---|---|
+| `crank_4310` | Zero-linkage crank gripper (follower arms) |
+| `linear_3507` | Linear gripper with DM3507 motor (requires calibration) |
+| `linear_4310` | Linear gripper with DM4310 motor |
+| `yam_teaching_handle` | Teaching handle for leader arms (trigger + 2 buttons) |
+| `no_gripper` | No gripper attached |
+
+## Project Structure
+
+```
+FoodManipLowLevel/
+├── config/
+│   └── leader_arms.yaml        # Arm CAN serial → name mapping
+├── scripts/
+│   ├── teleop.py               # Bimanual leader-follower teleop
+│   ├── zero_grav.py            # Zero gravity mode (test arms)
+│   ├── resolve_leader_can.py   # USB serial → CAN channel resolver
+│   ├── camera.py               # Camera preview + calibration capture
+│   ├── reset_all_can.sh        # Reset all CAN interfaces
+│   └── minimum_gello.py        # Single-pair leader-follower (original)
+├── i2rt/                       # I2RT robot SDK
+│   ├── robots/                 # Robot control (get_robot, motor_chain_robot)
+│   ├── motor_drivers/          # CAN/DM motor drivers
+│   ├── robot_models/           # URDF/MuJoCo XMLs
+│   └── utils/                  # MuJoCo, encoder, gamepad utilities
+├── lerobot/                    # HuggingFace LeRobot (submodule)
+└── examples/                   # I2RT example scripts
+```
+
+## Git Setup (for maintainers)
+
+### Change remote to private repo (one-time)
+
 ```bash
-python scripts/minimum_gello.py --mode visualizer_local
+# Rename original i2rt remote to "upstream" for future pulls
+git remote rename origin upstream
+
+# Add your private repo as the new origin
+git remote add origin git@github.com:jefferzn2001/FoodManipLowLevel.git
+
+# Push everything to your private repo
+git push -u origin main
 ```
 
----
+To pull upstream i2rt updates later:
 
-### Running the arm on controlling it leader follower style
-This requires one follower arm and one leader arm with the yam_teaching_handle gripper
-
-To launch the follower robot run
 ```bash
-python scripts/minimum_gello.py --gripper $YOUR_FOLLOWER_ARM_GRIPPER --mode follower --can-channel can0 --bilateral_kp 0.2
+git fetch upstream
+git merge upstream/main
 ```
 
-To launch the leader robot run
+### Add lerobot as a shallow submodule (one-time, already done)
+
 ```bash
-python scripts/minimum_gello.py --gripper yam_teaching_handle --mode leader --can-channel can1 --bilateral_kp 0.2
-```
-#### 🔧 Usage
-
-In this demo, the **top button** on the teaching handle controls the synchronization between the two arms:
-
-- **Press once** → The **follower arm** will gradually sync to the **leader arm** and maintain synchronization.
-- **Press again** → Synchronization stops, and the follower arm will no longer track the leader.
-
-
-Note on --bilateral_kp:
-This parameter controls how strongly the leader arm reacts to the follower arm's position deviation.
-A higher value (e.g. > 0.2) will make the leader arm feel heavier and more resistant.
-We recommend starting with a value between 0.1 and 0.2.
-
-If you just want to launch the **YAM follower arm** and inspect its output, you can run:
-```bash
-python scripts/run_yam_leader.py --channel $CAN_CHANNEL
-```
-example output:
-```bash
-[-0.33512627  0.00247959  0.00820172 -0.02079042 -0.4110399  -0.07381552]
-[PassiveEncoderInfo(id=1294, position=np.float64(0.004382802251101832), velocity=0.0, io_inputs=[0, 0])]
-```
-This script prints:
-- The arm joint angles
-- The trigger value on the teaching handle
-- The states of the two buttons
-
----
-
-### [Advanced Users Only]YAM configuration
-
-By default, the arm comes out of the factory with a safety timeout feature enabled. This timeout is set to 400ms, meaning that if the motor does not receive a command within 400ms, it will enter an error state, disable itself, and switch to damping mode. (Contact sales@i2rt.com if you want to disable this feature by default for your bulk order.)
-
-We consider this a safety mechanism—particularly in cases where the CAN connection goes offline. Without this safeguard, gravity compensation under certain configurations could produce positive feedback torque, potentially leading to injury.
-However, we understand that this feature may not always be desirable, especially when the arm is intentionally offline. For such cases, we provide a tool to disable the timeout feature.
-
-
-To remove the timeout feature, run the following command.
-```bash
-python i2rt/motor_config_tool/set_timeout.py --channel can0
-python i2rt/motor_config_tool/set_timeout.py --channel can0
+git submodule add --depth 1 git@github.com:huggingface/lerobot.git lerobot
+git commit -m "Add lerobot as shallow submodule"
+git push
 ```
 
-To set the timeout feature, run the following command.
-```bash
-python i2rt/motor_config_tool/set_timeout.py --channel can0 --timeout
-```
+## Advanced: YAM Motor Configuration
 
-We also provide a tool to zero the motor offsets.
-```bash
-python i2rt/motor_config_tool/set_zero.py --channel can0 --motor_id 1
-```
-After moving the timeout, you can initialize the YAM arm with the same following command.
-```python
-from i2rt.robots.motor_chain_robot import get_yam_robot
-# Get a robot instance
-robot = get_yam_robot(channel="can0")
-```
+See the [I2RT upstream docs](https://github.com/i2rt-robotics/i2rt) for:
 
-One important way to reduce the risk of the arm going out of control is to avoid entering zero-gravity mode.
-
-By default, the arm initializes in zero-gravity mode. As mentioned earlier, if the arm does not have a timeout but the gravity compensation loop fails, the motor controller will continue applying a constant torque. This can lead to unexpected and potentially unsafe behavior.
-
-To prevent this, you should always set a PD target. With a PD target, the motor controller ensures the arm reaches a stable state rather than drifting under uncontrolled torque.
-
-You can disable the default zero-gravity initialization like this:
-```python
-robot = get_yam_robot(channel="can0", zero_gravity_mode=False)
-```
-
-In this mode, the current joint positions (`qpos`) are used as the PD target, keeping the arm stable in its initial state.
-
-## Flow Base Usage
-
-For unboxing instructions and hardware setup details, please refer to the [FlowBase README](./i2rt/flow_base/README.md).
-
-### Running the demo
-You can control your flow base using a game controller.
-To run the joystick demo, run the following command.
-```bash
-python i2rt/flow_base/flow_base_controller.py
-```
-
-### Getting started
-```python
-from i2rt.flow_base.flow_base_controller import Vehicle
-import time
-
-# Get a robot instance
-vehicle = Vehicle()
-vehicle.start_control()
-
-# move forward slowly for 1 second
-start_time = time.time()
-while time.time() - start_time < 1:
-    user_cmd = (0.1, 0, 0)
-    vehicle.set_target_velocity(user_cmd, frame="local")
-```
-
-
-## Contributing
-We welcome contributions! Please make a PR.
-
-## License
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
-
-## Support
-- Contact: support@i2rt.com
+- [Setting persistent CAN IDs](doc/set_persist_id_socket_can.md)
+- [Teaching handle details](doc/yam_handle_readme.md)
+- Motor timeout config: `python i2rt/motor_config_tool/set_timeout.py --channel can0`
+- Motor zero offset: `python i2rt/motor_config_tool/set_zero.py --channel can0 --motor_id 1`
 
 ## Acknowledgments
-- [TidyBot++](https://github.com/jimmyyhwu/tidybot2) - Flow base hardware and code is inspired by TidyBot++
-- [GELLO](https://github.com/wuphilipp/gello_software) - Robot arm teleop is inspired by GELLO
+
+- [I2RT](https://i2rt.com/) — YAM robot arm hardware and SDK
+- [LeRobot](https://github.com/huggingface/lerobot) — Policy training framework
+- [TidyBot++](https://github.com/jimmyyhwu/tidybot2) — Flow base inspiration
+- [GELLO](https://github.com/wuphilipp/gello_software) — Teleop inspiration

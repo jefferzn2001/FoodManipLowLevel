@@ -1,0 +1,1 @@
+SUBSYSTEM=="net", ACTION=="add", KERNEL=="can*", ENV{ID_SERIAL}=="canable.io_canable2_gs_usb_005F0056594E501820313332", NAME="can_leader_right"

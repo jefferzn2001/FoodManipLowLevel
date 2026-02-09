@@ -1,0 +1,20 @@
+# CAN adapter mapping by USB serial
+# This avoids OS-level renaming and is resolved at runtime
+# gripper_type is per-arm so leader vs follower is handled automatically
+
+leader_arms:
+  Lleft:
+    usb_serial: "canable.io_canable2_gs_usb_00330052594E501820313332"
+    gripper_type: "yam_teaching_handle"
+  Lright:
+    usb_serial: "canable.io_canable2_gs_usb_005F0056594E501820313332"
+    gripper_type: "yam_teaching_handle"
+
+follower_arms:
+  Fleft:
+    usb_serial: "canable.io_canable2_gs_usb_002A0064594E501820313332"
+    gripper_type: "crank_4310"
+  Fright:
+    usb_serial: "canable.io_canable2_gs_usb_004C0053594E501820313332"
+    gripper_type: "crank_4310"
+

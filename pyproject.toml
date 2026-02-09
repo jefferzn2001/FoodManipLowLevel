@@ -17,6 +17,7 @@ dependencies = [
     "portal==3.7.3",
     "pygame==2.6.1",
     "python-can==4.5.0",
+    "pyyaml>=6.0",
     "qpsolvers[quadprog]==4.7.1",
     "ruckig==0.15.3",
     "threadpoolctl==3.6.0",
