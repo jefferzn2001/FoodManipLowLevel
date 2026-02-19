@@ -1,7 +1,7 @@
 """
 Resolve arm CAN interfaces at runtime using USB serial numbers.
 
-Reads config/leader_arms.yaml and matches each USB serial to the
+Reads config/arms.yaml and matches each USB serial to the
 live socketcan interface (can0, can1, …) via udevadm.
 
 Each arm entry also carries its gripper_type so callers don't need
@@ -21,7 +21,7 @@ from typing import Dict, List
 
 import yaml
 
-CONFIG_PATH = Path(__file__).resolve().parents[1] / "config" / "leader_arms.yaml"
+CONFIG_PATH = Path(__file__).resolve().parents[1] / "config" / "arms.yaml"
 
 
 @dataclass
@@ -31,10 +31,12 @@ class ArmInfo:
     Attributes:
         channel: Live CAN interface name (e.g. "can0").
         gripper_type: Gripper type string from the config (e.g. "yam_teaching_handle").
+        gravity_comp_factor: Gravity compensation scale factor (leaders only).
     """
 
     channel: str
     gripper_type: str
+    gravity_comp_factor: float = 1.2
 
 
 def _get_usb_serial(can_iface: str) -> str:
@@ -106,9 +108,11 @@ def resolve_arms(
         if usb_serial not in found:
             missing.append(f"  {arm_name}: {usb_serial}")
         else:
+            gravity_comp_factor = float(arm_props.get("gravity_comp_factor", 1.2))
             result[arm_name] = ArmInfo(
                 channel=found[usb_serial],
                 gripper_type=gripper_type,
+                gravity_comp_factor=gravity_comp_factor,
             )
 
     if missing:
@@ -119,6 +123,22 @@ def resolve_arms(
         )
 
     return result
+
+
+def load_teleop_config(
+    config_path: Path = CONFIG_PATH,
+) -> dict:
+    """Load the ``teleop`` section of the config (e.g. bilateral_kp).
+
+    Args:
+        config_path (Path): Path to the YAML config file.
+
+    Returns:
+        dict: Contents of the ``teleop`` key, or {} if absent.
+    """
+    with open(config_path, "r") as f:
+        cfg = yaml.safe_load(f)
+    return cfg.get("teleop", {})
 
 
 def ensure_can_up(

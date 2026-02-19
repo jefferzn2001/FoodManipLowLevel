@@ -3,7 +3,7 @@
 Launch one or both YAM leader arms in zero-gravity (gravity compensation) mode.
 
 CAN channels and gripper types are resolved automatically from
-config/leader_arms.yaml (per-arm properties).
+config/arms.yaml (per-arm properties).
 
 Usage:
     # Both leader arms (default)
@@ -70,6 +70,7 @@ def launch_arm(arm_info: ArmInfo, label: str) -> MotorChainRobot:
         channel=arm_info.channel,
         gripper_type=gripper_type,
         zero_gravity_mode=True,
+        gravity_comp_factor=arm_info.gravity_comp_factor,
     )
     logging.info(f"[{label}] Ready — zero-gravity mode active")
     return robot

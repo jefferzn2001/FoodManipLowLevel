@@ -23,7 +23,8 @@ def get_encoder_chain(can_interface: CanInterface) -> EncoderChain:
 def get_yam_robot(
     channel: str = "can0",
     gripper_type: GripperType = GripperType.CRANK_4310,
-    zero_gravity_mode:bool = True,
+    zero_gravity_mode: bool = True,
+    gravity_comp_factor: float = 1.2,
 ) -> MotorChainRobot:
     with_gripper = True
     with_teaching_handle = False
@@ -113,7 +114,7 @@ def get_yam_robot(
         motor_chain=motor_chain,
         xml_path=model_path,
         use_gravity_comp=True,
-        gravity_comp_factor=1.2,
+        gravity_comp_factor=gravity_comp_factor,
         joint_limits=joint_limits,
         kp=kp,
         kd=kd,

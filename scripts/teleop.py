@@ -2,7 +2,7 @@
 """
 Bimanual leader-follower teleop for YAM arms.
 
-Resolves CAN interfaces and gripper types from config/leader_arms.yaml,
+Resolves CAN interfaces and gripper types from config/arms.yaml,
 brings up CAN links, and runs leader-follower pairs.
 
 Usage:
@@ -34,7 +34,7 @@ from i2rt.robots.motor_chain_robot import MotorChainRobot
 from i2rt.robots.utils import GripperType
 from i2rt.utils.utils import override_log_level
 
-from resolve_leader_can import ArmInfo, ensure_can_up, resolve_arms
+from resolve_leader_can import ArmInfo, ensure_can_up, load_teleop_config, resolve_arms
 
 # Use different ports for left and right follower servers
 PORT_LEFT = 11333
@@ -172,6 +172,7 @@ def run_leader_follower_loop(
     leader: YAMLeaderRobot,
     client: ClientRobot,
     bilateral_kp: float,
+    gravity_comp_factor: float,
     label: str,
     stop_event: threading.Event,
 ) -> None:
@@ -181,6 +182,7 @@ def run_leader_follower_loop(
         leader (YAMLeaderRobot): The leader arm.
         client (ClientRobot): RPC client to the follower server.
         bilateral_kp (float): Bilateral PD gain factor.
+        gravity_comp_factor (float): Gravity comp scale when synced (0 when not synced).
         label (str): Label for logging.
         stop_event (threading.Event): Set to signal shutdown.
     """
@@ -206,23 +208,27 @@ def run_leader_follower_loop(
     while not stop_event.is_set():
         current_joint_pos, current_button = leader.get_info()
 
-        # Button[0] toggles sync
+        # Button[0] toggles sync and gravity compensation together.
+        # Gravity comp is only active while synced so the arm doesn't
+        # fly up when the user is not holding it.
         if current_button[0] > 0.5:
             if not synchronized:
+                leader._robot.gravity_comp_factor = gravity_comp_factor
                 leader.update_kp_kd(
                     kp=leader_kp * bilateral_kp,
                     kd=np.zeros(6),
                 )
                 leader.command_joint_pos(current_joint_pos[:6])
                 slow_move(current_joint_pos, current_follower_joint_pos)
-                logging.info(f"[{label}] Synchronized")
+                logging.info(f"[{label}] Synchronized (gravity_comp={gravity_comp_factor})")
             else:
+                leader._robot.gravity_comp_factor = 0.0
                 leader.update_kp_kd(
                     kp=np.zeros(6),
                     kd=np.zeros(6),
                 )
                 leader.command_joint_pos(current_follower_joint_pos[:6])
-                logging.info(f"[{label}] Un-synchronized")
+                logging.info(f"[{label}] Un-synchronized (gravity_comp off)")
             synchronized = not synchronized
 
             # Wait for button release
@@ -262,11 +268,12 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Run only the right pair (Lright → Fright).",
     )
+    teleop_cfg = load_teleop_config()
     parser.add_argument(
         "--bilateral_kp",
         type=float,
-        default=0.2,
-        help="Bilateral PD gain factor (default: 0.2).",
+        default=teleop_cfg.get("bilateral_kp", 0.2),
+        help="Bilateral PD gain factor (default from config).",
     )
     return parser.parse_args()
 
@@ -317,6 +324,7 @@ def main() -> None:
             channel=l_info.channel,
             gripper_type=gripper_type,
             zero_gravity_mode=True,
+            gravity_comp_factor=0.0,  # starts off; enabled when user presses sync button
         )
         _all_robots.append(robot)
         leader = YAMLeaderRobot(robot)
@@ -324,7 +332,7 @@ def main() -> None:
 
         t = threading.Thread(
             target=run_leader_follower_loop,
-            args=(leader, client, args.bilateral_kp, f"{l_key}→{f_key}", stop_event),
+            args=(leader, client, args.bilateral_kp, l_info.gravity_comp_factor, f"{l_key}→{f_key}", stop_event),
             name=f"teleop_{l_key}",
             daemon=True,
         )
