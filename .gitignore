@@ -73,6 +73,7 @@ config.yaml
 # Ignore large data files (if applicable)
 data/
 datasets/
+outputs/
 *.csv
 *.h5
 *.npz

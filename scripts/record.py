@@ -21,8 +21,11 @@ Usage:
 """
 
 import argparse
+import contextlib
+import glob
 import logging
 import math
+import os
 import signal
 import sys
 import threading
@@ -30,9 +33,28 @@ import time
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
+os.environ["OPENCV_LOG_LEVEL"] = "SILENT"
+
 import cv2
 import numpy as np
 from PIL import Image
+
+# Create Qt font directory to suppress QFontDatabase warnings
+os.makedirs(os.path.join(os.path.dirname(cv2.__file__), "qt", "fonts"), exist_ok=True)
+
+
+@contextlib.contextmanager
+def _quiet_stderr():
+    """Suppress C-level stderr (Qt/OpenCV noise that bypasses Python logging)."""
+    devnull = os.open(os.devnull, os.O_WRONLY)
+    saved = os.dup(2)
+    os.dup2(devnull, 2)
+    os.close(devnull)
+    try:
+        yield
+    finally:
+        os.dup2(saved, 2)
+        os.close(saved)
 
 from i2rt.robots.get_robot import get_yam_robot
 from i2rt.robots.motor_chain_robot import MotorChainRobot
@@ -120,9 +142,13 @@ class RecordingState:
 class CameraReader:
     """Continuously reads frames from a camera in a background thread."""
 
-    def __init__(self, index: int) -> None:
-        self.index = index
-        self._cap = cv2.VideoCapture(index)
+    def __init__(self, device: str, width: int = 640, height: int = 360) -> None:
+        self.device = device
+        self.index = int(device.replace("/dev/video", ""))
+        self._cap = cv2.VideoCapture(device, cv2.CAP_V4L2)
+        self._cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
+        self._cap.set(cv2.CAP_PROP_FRAME_WIDTH, width)
+        self._cap.set(cv2.CAP_PROP_FRAME_HEIGHT, height)
         self._cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
         self.width = int(self._cap.get(cv2.CAP_PROP_FRAME_WIDTH))
         self.height = int(self._cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
@@ -130,7 +156,7 @@ class CameraReader:
         self._lock = threading.Lock()
         self._stop = threading.Event()
         self._thread = threading.Thread(
-            target=self._read_loop, daemon=True, name=f"cam_{index}"
+            target=self._read_loop, daemon=True, name=f"cam_{self.index}"
         )
 
     def start(self) -> None:
@@ -154,18 +180,39 @@ class CameraReader:
 
 
 def detect_cameras() -> List[CameraReader]:
-    """Auto-detect all available cameras, start readers, return them."""
+    """Auto-detect cameras using stable USB path symlinks.
+
+    Uses /dev/v4l/by-path/ so that camera order is determined by
+    physical USB port, not by boot/plug order. Falls back to
+    /dev/videoN if by-path is not available.
+    """
+    by_path = sorted(glob.glob("/dev/v4l/by-path/*-video-index0"))
+    if by_path:
+        paths = [os.path.realpath(p) for p in by_path]
+        logging.info(f"Using stable USB paths: {dict(zip(by_path, paths))}")
+    else:
+        paths = sorted(
+            (p for p in glob.glob("/dev/video*") if p[len("/dev/video"):].isdigit()),
+            key=lambda p: int(p[len("/dev/video"):]),
+        )
+
     readers = []
-    for idx in range(10):
-        cap = cv2.VideoCapture(idx)
-        if cap.isOpened():
-            cap.release()
-            reader = CameraReader(idx)
-            reader.start()
-            readers.append(reader)
-            logging.info(f"Camera {idx}: {reader.width}×{reader.height}")
-        else:
-            cap.release()
+    with _quiet_stderr():
+        for path in paths:
+            cap = cv2.VideoCapture(path, cv2.CAP_V4L2)
+            if cap.isOpened():
+                cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
+                ret, _ = cap.read()
+                w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+                h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+                cap.release()
+                if ret and w > 0 and h > 0:
+                    reader = CameraReader(path)
+                    reader.start()
+                    readers.append(reader)
+                    logging.info(f"Camera {path}: {reader.width}×{reader.height}")
+            else:
+                cap.release()
     if not readers:
         logging.warning("No cameras detected — recording without images")
     return readers
@@ -182,8 +229,8 @@ def tile_frames(
     n = len(frames)
     if n == 0:
         return np.zeros((target_h, target_w, 3), dtype=np.uint8)
-    ncols = math.ceil(math.sqrt(n))
-    nrows = math.ceil(n / ncols)
+    ncols = 1
+    nrows = n
     cell_w = target_w // ncols
     cell_h = target_h // nrows
     canvas = np.zeros((nrows * cell_h, ncols * cell_w, 3), dtype=np.uint8)
@@ -310,10 +357,7 @@ def run_leader_follower_loop(
 
         # Bottom button: start/stop episode recording
         if current_button[1] > 0.5:
-            if synchronized or recording_state.is_recording:
-                recording_state.toggle(label=label)
-            else:
-                logging.info(f"[{label}] Enable sync first before recording")
+            recording_state.toggle(label=label)
             while current_button[1] > 0.5 and not stop_event.is_set():
                 time.sleep(0.03)
                 current_joint_pos, current_button = leader.get_info()
@@ -338,7 +382,9 @@ def recording_loop(
     hz: float,
     recording_state: RecordingState,
     stop_event: threading.Event,
+    resolution: Optional[Tuple[int, int]] = None,
 ) -> None:
+    record_h, record_w = resolution if resolution else (None, None)
     period = 1.0 / hz
     frames_in_episode = 0
 
@@ -373,6 +419,8 @@ def recording_loop(
                 for i, cam in enumerate(cameras):
                     bgr = cam.get_frame()
                     if bgr is not None:
+                        if record_h is not None:
+                            bgr = cv2.resize(bgr, (record_w, record_h))
                         frame[f"observation.images.cam_{i}"] = Image.fromarray(
                             cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
                         )
@@ -402,6 +450,7 @@ def recording_loop(
 def build_features(
     arm_labels: List[str],
     cameras: List[CameraReader],
+    resolution: Optional[Tuple[int, int]] = None,
 ) -> dict:
     joint_names = []
     for arm in arm_labels:
@@ -421,9 +470,11 @@ def build_features(
         },
     }
     for i, cam in enumerate(cameras):
+        h = resolution[0] if resolution else cam.height
+        w = resolution[1] if resolution else cam.width
         features[f"observation.images.cam_{i}"] = {
             "dtype": "video",
-            "shape": (cam.height, cam.width, 3),
+            "shape": (h, w, 3),
             "names": ["height", "width", "channels"],
         }
     return features
@@ -448,6 +499,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--visualize", action="store_true",
                         help="Show live camera feeds in a fullscreen window while recording.")
     parser.add_argument(
+        "--cameras", type=int, nargs="+", default=None,
+        help="Camera indices to record. Auto-detects all if not specified.",
+    )
+    parser.add_argument(
+        "--resolution", type=int, nargs=2, default=None, metavar=("H", "W"),
+        help="Record at HxW resolution (e.g. --resolution 240 320). "
+             "Frames are resized in software. Default: native camera resolution.",
+    )
+    parser.add_argument(
         "--bilateral_kp", type=float,
         default=teleop_cfg.get("bilateral_kp", 0.2),
         help="Bilateral PD gain factor.",
@@ -458,6 +518,8 @@ def parse_args() -> argparse.Namespace:
 # ── Main ──────────────────────────────────────────────────────────────────
 
 def main() -> None:
+    os.environ.setdefault("QT_QPA_FONTDIR", "/usr/share/fonts")
+
     if not LEROBOT_AVAILABLE:
         sys.exit("LeRobot not found. Install: pip install -e lerobot/")
 
@@ -465,10 +527,27 @@ def main() -> None:
     override_log_level(level=logging.INFO)
 
     # ── Cameras ──────────────────────────────────────────────────────────
-    logging.info("Detecting cameras...")
-    cameras = detect_cameras()
+    if args.cameras:
+        devices = [f"/dev/video{i}" for i in args.cameras]
+        logging.info(f"Opening cameras: {devices}")
+        cameras = []
+        for dev in devices:
+            r = CameraReader(dev)
+            r.start()
+            cameras.append(r)
+            logging.info(f"  {dev}: {r.width}×{r.height}")
+    else:
+        logging.info("Auto-detecting cameras...")
+        cameras = detect_cameras()
     time.sleep(0.3)  # warm-up
     logging.info(f"{len(cameras)} camera(s) active")
+
+    # ── Optional resolution override ─────────────────────────────────────
+    if args.resolution:
+        record_h, record_w = args.resolution
+        logging.info(f"Recording resolution override: {record_h}×{record_w}")
+    else:
+        record_h = record_w = None  # use native camera resolution
 
     # ── Resolve arms ─────────────────────────────────────────────────────
     logging.info("Resolving arm CAN interfaces...")
@@ -487,23 +566,48 @@ def main() -> None:
 
     # ── Dataset ───────────────────────────────────────────────────────────
     root = Path("data") / args.name
-    features = build_features(arm_labels, cameras)
-    dataset = LeRobotDataset.create(
-        repo_id=f"yam/{args.name}",
-        fps=args.hz,
-        features=features,
-        robot_type="yam_bimanual",
-        root=root,
-        use_videos=True,
-        image_writer_threads=max(4 * len(cameras), 4),
-    )
-    logging.info(f"Dataset → {root.resolve()}")
+    features = build_features(arm_labels, cameras, resolution=args.resolution)
+    repo_id = f"yam/{args.name}"
+    n_threads = max(4 * len(cameras), 4)
+
+    import json
+    import shutil
+    _info_path = root / "meta" / "info.json"
+    _can_resume = False
+    if _info_path.exists():
+        try:
+            _info = json.loads(_info_path.read_text())
+            _can_resume = _info.get("total_episodes", 0) > 0
+        except (json.JSONDecodeError, KeyError):
+            pass
+    if not _can_resume and root.exists():
+        shutil.rmtree(root)
+        logging.info(f"Removed incomplete dataset at {root}")
+
+    if _can_resume:
+        logging.info(f"Resuming existing dataset at {root}")
+        dataset = LeRobotDataset(repo_id=repo_id, root=root)
+        dataset.start_image_writer(num_threads=n_threads)
+        dataset.episode_buffer = dataset.create_episode_buffer()
+    else:
+        dataset = LeRobotDataset.create(
+            repo_id=repo_id,
+            fps=int(args.hz),
+            features=features,
+            robot_type="yam_bimanual",
+            root=root,
+            use_videos=True,
+            image_writer_threads=n_threads,
+        )
+    logging.info(f"Dataset → {root.resolve()}  "
+                 f"(episodes so far: {dataset.meta.total_episodes})")
     logging.info(f"State/action dim: {len(features['action']['names'])}, "
                  f"cameras: {len(cameras)}, hz: {args.hz}")
 
     # ── Shared state + stop event ─────────────────────────────────────────
     arm_states: Dict[str, ArmState] = {l_key: ArmState() for l_key, _, _ in pairs}
     recording_state = RecordingState()
+    recording_state.episode_idx = dataset.meta.total_episodes
     stop_event = threading.Event()
 
     # ── Follower servers ──────────────────────────────────────────────────
@@ -515,7 +619,8 @@ def main() -> None:
     rec_thread = threading.Thread(
         target=recording_loop,
         args=(arm_states.get("Lleft"), arm_states.get("Lright"),
-              cameras, dataset, args.task, args.hz, recording_state, stop_event),
+              cameras, dataset, args.task, args.hz, recording_state, stop_event,
+              args.resolution),
         name="recording", daemon=True,
     )
     rec_thread.start()
@@ -543,13 +648,18 @@ def main() -> None:
 
     # ── Shutdown handler ──────────────────────────────────────────────────
     _shutting_down = False
+    _force_count = 0
 
     def _shutdown(sig: int, frame: object) -> None:
-        nonlocal _shutting_down
+        nonlocal _shutting_down, _force_count
         if _shutting_down:
-            import os; os._exit(1)
+            _force_count += 1
+            if _force_count >= 2:
+                logging.warning("Force exit (data may be incomplete)")
+                import os; os._exit(1)
+            logging.warning("Press Ctrl-C twice more to force quit without cleanup")
         _shutting_down = True
-        logging.info("Shutting down (Ctrl-C again to force)...")
+        logging.info("Shutting down (finalizing dataset)...")
         stop_event.set()
 
     signal.signal(signal.SIGINT, _shutdown)
@@ -563,58 +673,72 @@ def main() -> None:
     )
 
     # ── Main loop: optional live visualisation ────────────────────────────
-    if args.visualize and cameras:
-        cam_labels = [f"cam {c.index}" for c in cameras]
-        win = "record.py — Q/ESC to quit"
-        cv2.namedWindow(win, cv2.WINDOW_NORMAL)
-        cv2.setWindowProperty(win, cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_FULLSCREEN)
+    try:
+        if args.visualize and cameras:
+            cam_labels = [f"cam {c.index}" for c in cameras]
+            win = "record.py — Q/ESC to quit"
+            with _quiet_stderr():
+                cv2.namedWindow(win, cv2.WINDOW_NORMAL)
+                cv2.setWindowProperty(win, cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_FULLSCREEN)
 
-        while not stop_event.is_set():
-            frames = [c.get_frame() for c in cameras]
-            rect = cv2.getWindowImageRect(win)
-            disp_w, disp_h = max(rect[2], 640), max(rect[3], 480)
-            canvas = tile_frames(frames, cam_labels, disp_w, disp_h)
+            while not stop_event.is_set():
+                frames = [c.get_frame() for c in cameras]
+                rect = cv2.getWindowImageRect(win)
+                disp_w, disp_h = max(rect[2], 640), max(rect[3], 480)
+                canvas = tile_frames(frames, cam_labels, disp_w, disp_h)
 
-            # Recording status overlay
-            if recording_state.is_recording:
-                label = f"  REC  ep {recording_state.episode_idx}"
-                cv2.putText(canvas, label, (disp_w - 300, disp_h - 16),
-                            cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 0, 200), 4)
-                cv2.putText(canvas, label, (disp_w - 300, disp_h - 16),
-                            cv2.FONT_HERSHEY_SIMPLEX, 1.0, (80, 80, 255), 2)
-            else:
-                label = f"ep {recording_state.episode_idx} saved"
-                cv2.putText(canvas, label, (disp_w - 280, disp_h - 16),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 0), 3)
-                cv2.putText(canvas, label, (disp_w - 280, disp_h - 16),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.8, (180, 180, 180), 1)
+                # Recording status overlay
+                if recording_state.is_recording:
+                    label = f"  REC  ep {recording_state.episode_idx}"
+                    cv2.putText(canvas, label, (disp_w - 300, disp_h - 16),
+                                cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 0, 200), 4)
+                    cv2.putText(canvas, label, (disp_w - 300, disp_h - 16),
+                                cv2.FONT_HERSHEY_SIMPLEX, 1.0, (80, 80, 255), 2)
+                else:
+                    label = f"ep {recording_state.episode_idx} saved"
+                    cv2.putText(canvas, label, (disp_w - 280, disp_h - 16),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 0), 3)
+                    cv2.putText(canvas, label, (disp_w - 280, disp_h - 16),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.8, (180, 180, 180), 1)
 
-            cv2.imshow(win, canvas)
-            key = cv2.waitKey(30) & 0xFF
-            if key in (ord('q'), ord('Q'), 27):
-                stop_event.set()
+                cv2.imshow(win, canvas)
+                key = cv2.waitKey(30) & 0xFF
+                if key in (ord('q'), ord('Q'), 27):
+                    stop_event.set()
 
-        cv2.destroyAllWindows()
-    else:
-        while not stop_event.is_set():
-            time.sleep(0.5)
-
-    # ── Cleanup ───────────────────────────────────────────────────────────
-    if recording_state.is_recording:
-        logging.info("Saving in-progress episode before exit...")
-        dataset.save_episode()
-        recording_state.episode_idx += 1
-
-    dataset.finalize()
-    logging.info(f"Done — {recording_state.episode_idx} episode(s) → {root.resolve()}")
-
-    for cam in cameras:
-        cam.stop()
-    for robot in _all_robots:
+            cv2.destroyAllWindows()
+        else:
+            while not stop_event.is_set():
+                time.sleep(0.5)
+    except Exception as e:
+        logging.error(f"Main loop error: {e}")
+        stop_event.set()
+    finally:
+        # ── Cleanup (always runs, even on crash) ─────────────────────────
         try:
-            robot.close()
+            if recording_state.is_recording:
+                logging.info("Saving in-progress episode before exit...")
+                dataset.save_episode()
+                recording_state.episode_idx += 1
         except Exception as e:
-            logging.warning(f"Error closing robot: {e}")
+            logging.warning(f"Could not save in-progress episode: {e}")
+
+        try:
+            dataset.finalize()
+            logging.info(f"Done — {recording_state.episode_idx} episode(s) → {root.resolve()}")
+        except Exception as e:
+            logging.warning(f"Error finalizing dataset: {e}")
+
+        for cam in cameras:
+            try:
+                cam.stop()
+            except Exception:
+                pass
+        for robot in _all_robots:
+            try:
+                robot.close()
+            except Exception as e:
+                logging.warning(f"Error closing robot: {e}")
 
 
 if __name__ == "__main__":

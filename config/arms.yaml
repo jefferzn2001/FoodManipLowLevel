@@ -6,11 +6,11 @@ leader_arms:
   Lleft:
     usb_serial: "canable.io_canable2_gs_usb_00330052594E501820313332"
     gripper_type: "yam_teaching_handle"
-    gravity_comp_factor: 1.4  # increase to make arm easier to backdrive (less stiff)
+    gravity_comp_factor: 1.2  # increase to make arm easier to backdrive (less stiff)
   Lright:
     usb_serial: "canable.io_canable2_gs_usb_005F0056594E501820313332"
     gripper_type: "yam_teaching_handle"
-    gravity_comp_factor: 1.4
+    gravity_comp_factor: 1.2
 
 follower_arms:
   Fleft:
