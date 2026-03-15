@@ -144,6 +144,75 @@ python lerobot/src/lerobot/scripts/lerobot_train.py \
 
 Start with 50 clean ACT demonstrations. Keep episodes short (5–15 s) and consistent.
 
+### Deploy LeRobot policy (ACT / Diffusion)
+
+```bash
+python scripts/deploy.py --policy outputs/act_blockincup/checkpoints/last/pretrained_model
+python scripts/deploy.py --policy outputs/act_blockincup/checkpoints/last/pretrained_model --visualize
+```
+
+### Deploy VLA policy (Dexbotic OFT)
+
+The VLA (Vision-Language-Action) model is goal-conditioned: it sees the current camera frame + a goal image and predicts 16 bimanual delta-action steps. This requires two terminals — one for the GPU inference server, one for the robot control loop.
+
+#### VLA environment setup (one-time)
+
+```bash
+conda create -n dexbotic python=3.10 -y
+conda activate dexbotic
+
+# Install PyTorch with Blackwell GPU support (sm_120)
+pip install torch torchvision --index-url https://download.pytorch.org/whl/cu128
+
+# Install Dexbotic
+cd food_manipulation
+pip install -e .
+pip install ipdb
+
+# Verify GPU
+python -c "import torch; print(f'PyTorch {torch.__version__}, CUDA: {torch.cuda.is_available()}')"
+```
+
+#### Step 1 — Start the VLA inference server (Terminal 1)
+
+```bash
+conda activate dexbotic
+cd ~/Desktop/FoodManipLowLevel/food_manipulation
+CUDA_VISIBLE_DEVICES=0 python playground/custom/blockincup_oft.py --task inference
+```
+
+Wait for `Model loaded successfully` and `Running on http://127.0.0.1:7891`.
+
+#### Step 2 — Capture a goal image (Terminal 2)
+
+Set up the scene as the **desired end state** (e.g. block inside cup), then:
+
+```bash
+cd ~/Desktop/FoodManipLowLevel
+source .venv/bin/activate
+python -c "import cv2; cap=cv2.VideoCapture('/dev/video0',cv2.CAP_V4L2); _, f=cap.read(); cv2.imwrite('goal.png',f); cap.release(); print('Saved goal.png')"
+eog goal.png   # verify the image
+```
+
+Then reset the scene to the starting state (e.g. block outside cup).
+
+#### Step 3 — Run the VLA deployment (Terminal 2)
+
+```bash
+cd ~/Desktop/FoodManipLowLevel
+source .venv/bin/activate
+python scripts/deploy_vla.py --goal_image goal.png              # no camera view
+python scripts/deploy_vla.py --goal_image goal.png --visualize  # with live camera view
+```
+
+**Controls:**
+- Robot starts **paused** — press **top button** on leader arm to start
+- Press **top button** again → **e-stop** (pause)
+- Press **top button** again → resume
+- **Ctrl-C** → stop and exit
+
+The model checkpoint is at `food_manipulation/user_checkpoints/dexbotic/blockincup_oft/checkpoint-725/` (downloaded from `ymdou/blockincup_oft`).
+
 ---
 
 ## Configuration — `config/arms.yaml`

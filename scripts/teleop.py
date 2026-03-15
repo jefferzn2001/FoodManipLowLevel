@@ -17,6 +17,10 @@ Usage:
 
     # Custom bilateral_kp
     python scripts/teleop.py --bilateral_kp 0.15
+
+    # With live camera view (no recording); same tiled format as record.py
+    python scripts/teleop.py --visualize
+    python scripts/teleop.py --visualize --cameras 0 1   # force both cameras
 """
 
 import argparse
@@ -275,6 +279,18 @@ def parse_args() -> argparse.Namespace:
         default=teleop_cfg.get("bilateral_kp", 0.2),
         help="Bilateral PD gain factor (default from config).",
     )
+    parser.add_argument(
+        "--visualize",
+        action="store_true",
+        help="Show live camera feeds in a fullscreen window while teleoping.",
+    )
+    parser.add_argument(
+        "--cameras",
+        type=int,
+        nargs="+",
+        default=None,
+        help="Camera indices to show with --visualize (e.g. --cameras 0 1). Auto-detect all if not set.",
+    )
     return parser.parse_args()
 
 
@@ -291,6 +307,25 @@ def main() -> None:
     # Bring up all CAN interfaces
     all_arms: Dict[str, ArmInfo] = {**leaders, **followers}
     ensure_can_up(all_arms)
+
+    # Optional: cameras for --visualize (same detection and format as record.py)
+    cameras: List = []
+    if args.visualize:
+        import os as _os
+        _os.environ.setdefault("OPENCV_LOG_LEVEL", "SILENT")
+        import cv2 as _cv2
+        from record import CameraReader, _quiet_stderr, detect_cameras, tile_frames
+        if args.cameras is not None:
+            devices = [f"/dev/video{i}" for i in args.cameras]
+            logging.info(f"Opening cameras: {devices}")
+            for dev in devices:
+                r = CameraReader(dev)
+                r.start()
+                cameras.append(r)
+                logging.info(f"  {dev}: {r.width}×{r.height}")
+        else:
+            cameras = detect_cameras()
+        logging.info(f"Visualize: {len(cameras)} camera(s)")
 
     # Decide which pairs to run
     pairs: List[Tuple[str, str, int]] = []  # (leader_key, follower_key, port)
@@ -358,10 +393,37 @@ def main() -> None:
 
     pair_labels = [f"{l}→{f}" for l, f, _ in pairs]
     logging.info(f"Teleop active: {', '.join(pair_labels)}. Press Ctrl-C to exit.")
+    if cameras:
+        logging.info("Camera window: Q or ESC to close (teleop continues until Ctrl-C).")
 
-    # Keep main thread alive until stop is signalled
-    while not stop_event.is_set():
-        time.sleep(0.5)
+    # Keep main thread alive: optional camera window or sleep
+    try:
+        if args.visualize and cameras:
+            from record import _quiet_stderr, tile_frames
+            win = "teleop.py — Q/ESC to close window"
+            with _quiet_stderr():
+                _cv2.namedWindow(win, _cv2.WINDOW_NORMAL)
+                _cv2.setWindowProperty(win, _cv2.WND_PROP_FULLSCREEN, _cv2.WINDOW_FULLSCREEN)
+            cam_labels = [f"cam {c.index}" for c in cameras]
+            while not stop_event.is_set():
+                frames = [c.get_frame() for c in cameras]
+                rect = _cv2.getWindowImageRect(win)
+                disp_w, disp_h = max(rect[2], 640), max(rect[3], 480)
+                canvas = tile_frames(frames, cam_labels, disp_w, disp_h)
+                _cv2.imshow(win, canvas)
+                key = _cv2.waitKey(30) & 0xFF
+                if key in (ord("q"), ord("Q"), 27):
+                    break
+            _cv2.destroyAllWindows()
+        else:
+            while not stop_event.is_set():
+                time.sleep(0.5)
+    finally:
+        for cam in cameras:
+            try:
+                cam.stop()
+            except Exception as e:
+                logging.warning(f"Error stopping camera: {e}")
 
     # Wait for leader threads to finish
     for t in leader_threads:

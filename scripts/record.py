@@ -152,6 +152,14 @@ class CameraReader:
         self._cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
         self.width = int(self._cap.get(cv2.CAP_PROP_FRAME_WIDTH))
         self.height = int(self._cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        if self.width <= 0 or self.height <= 0:
+            self._cap.release()
+            self._cap = cv2.VideoCapture(device, cv2.CAP_V4L2)
+            self._cap.set(cv2.CAP_PROP_FRAME_WIDTH, width)
+            self._cap.set(cv2.CAP_PROP_FRAME_HEIGHT, height)
+            self._cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+            self.width = int(self._cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+            self.height = int(self._cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
         self._frame: Optional[np.ndarray] = None
         self._lock = threading.Lock()
         self._stop = threading.Event()
@@ -180,39 +188,48 @@ class CameraReader:
 
 
 def detect_cameras() -> List[CameraReader]:
-    """Auto-detect cameras using stable USB path symlinks.
+    """Auto-detect cameras, probing both index0 and index1 per USB port.
 
-    Uses /dev/v4l/by-path/ so that camera order is determined by
-    physical USB port, not by boot/plug order. Falls back to
-    /dev/videoN if by-path is not available.
+    Each physical USB camera typically creates two /dev/videoN nodes
+    (index0 and index1). Only one is the real capture endpoint; the other
+    is metadata. We try both and keep whichever actually delivers frames.
+    Uses /dev/v4l/by-path/ for stable ordering by physical USB port.
     """
-    by_path = sorted(glob.glob("/dev/v4l/by-path/*-video-index0"))
-    if by_path:
-        paths = [os.path.realpath(p) for p in by_path]
-        logging.info(f"Using stable USB paths: {dict(zip(by_path, paths))}")
+    by_path_all = sorted(glob.glob("/dev/v4l/by-path/*-video-index*"))
+    if by_path_all:
+        ports: dict[str, list[str]] = {}
+        for p in by_path_all:
+            port_key = p.rsplit("-video-index", 1)[0]
+            ports.setdefault(port_key, []).append(p)
+        logging.info(f"Found {len(ports)} USB camera port(s)")
     else:
-        paths = sorted(
+        # Fallback: pair consecutive /dev/videoN as ports
+        all_devs = sorted(
             (p for p in glob.glob("/dev/video*") if p[len("/dev/video"):].isdigit()),
             key=lambda p: int(p[len("/dev/video"):]),
         )
+        ports = {p: [p] for p in all_devs}
 
     readers = []
     with _quiet_stderr():
-        for path in paths:
-            cap = cv2.VideoCapture(path, cv2.CAP_V4L2)
-            if cap.isOpened():
-                cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
+        for port_key in sorted(ports):
+            links = sorted(ports[port_key])
+            for lnk in links:
+                dev = os.path.realpath(lnk)
+                cap = cv2.VideoCapture(dev, cv2.CAP_V4L2)
+                if not cap.isOpened():
+                    cap.release()
+                    continue
                 ret, _ = cap.read()
                 w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
                 h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
                 cap.release()
                 if ret and w > 0 and h > 0:
-                    reader = CameraReader(path)
+                    reader = CameraReader(dev)
                     reader.start()
                     readers.append(reader)
-                    logging.info(f"Camera {path}: {reader.width}×{reader.height}")
-            else:
-                cap.release()
+                    logging.info(f"Camera {dev}: {reader.width}×{reader.height}")
+                    break  # found working node for this port
     if not readers:
         logging.warning("No cameras detected — recording without images")
     return readers

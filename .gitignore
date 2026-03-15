@@ -94,3 +94,6 @@ scripts/temp_*/
 
 # Camera calibration images
 camcal/
+
+# VLA model repo (large, external dependency)
+food_manipulation/

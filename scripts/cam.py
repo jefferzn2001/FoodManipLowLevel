@@ -49,12 +49,21 @@ class CameraReader:
         self.device = device
         self.index = int(device.replace("/dev/video", ""))
         self._cap = cv2.VideoCapture(device, cv2.CAP_V4L2)
+        # Try MJPG first (less CPU); fall back to driver default (often YUYV) if no frame
         self._cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
         self._cap.set(cv2.CAP_PROP_FRAME_WIDTH, width)
         self._cap.set(cv2.CAP_PROP_FRAME_HEIGHT, height)
         self._cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
         self.width = int(self._cap.get(cv2.CAP_PROP_FRAME_WIDTH))
         self.height = int(self._cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        if self.width <= 0 or self.height <= 0:
+            self._cap.release()
+            self._cap = cv2.VideoCapture(device, cv2.CAP_V4L2)
+            self._cap.set(cv2.CAP_PROP_FRAME_WIDTH, width)
+            self._cap.set(cv2.CAP_PROP_FRAME_HEIGHT, height)
+            self._cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+            self.width = int(self._cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+            self.height = int(self._cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
         self._frame: Optional[np.ndarray] = None
         self._lock = threading.Lock()
         self._stop = threading.Event()
@@ -82,33 +91,73 @@ class CameraReader:
         self._cap.release()
 
 
-def detect_cameras() -> List[str]:
-    """Return camera paths, using stable USB path symlinks when available."""
-    by_path = sorted(glob.glob("/dev/v4l/by-path/*-video-index0"))
-    if by_path:
-        candidates = [os.path.realpath(p) for p in by_path]
-        print(f"Using stable USB paths:")
-        for sym, dev in zip(by_path, candidates):
-            print(f"  {sym} -> {dev}")
+def detect_cameras() -> List[CameraReader]:
+    """Detect cameras and return started CameraReader instances.
+
+    Each physical USB camera typically creates two /dev/videoN nodes
+    (index0 and index1). Only one is the real capture endpoint; the other
+    is metadata. We try both and keep whichever actually delivers frames.
+    Uses /dev/v4l/by-path/ for stable ordering by physical USB port.
+
+    Returns CameraReader instances directly (already started) to avoid
+    the probe-then-reopen pattern that causes "No signal" on some cameras.
+    """
+    import time
+
+    by_path_all = sorted(glob.glob("/dev/v4l/by-path/*-video-index*"))
+    if by_path_all:
+        ports: dict[str, list[str]] = {}
+        for p in by_path_all:
+            port_key = p.rsplit("-video-index", 1)[0]
+            ports.setdefault(port_key, []).append(p)
+        print(f"Found {len(ports)} USB camera port(s)...")
+        # Build ordered candidate list: for each port, index0 first then index1
+        candidates = []
+        port_of: dict[str, str] = {}
+        for port_key in sorted(ports):
+            links = sorted(ports[port_key])
+            for lnk in links:
+                dev = os.path.realpath(lnk)
+                candidates.append(dev)
+                port_of[dev] = port_key
     else:
         candidates = sorted(
             (p for p in glob.glob("/dev/video*") if p[len("/dev/video"):].isdigit()),
             key=lambda p: int(p[len("/dev/video"):]),
         )
+        port_of = {p: p for p in candidates}
 
-    found = []
-    with _quiet_stderr():
-        for path in candidates:
-            cap = cv2.VideoCapture(path, cv2.CAP_V4L2)
-            if cap.isOpened():
-                cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
-                ret, _ = cap.read()
-                w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-                h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-                if ret and w > 0 and h > 0:
-                    found.append(path)
-            cap.release()
-    return found
+    # Open each candidate as a CameraReader, wait for a frame, keep the first
+    # working device per physical USB port.
+    readers: List[CameraReader] = []
+    seen_ports: set[str] = set()
+    for dev in candidates:
+        port = port_of[dev]
+        if port in seen_ports:
+            continue
+        try:
+            reader = CameraReader(dev)
+        except Exception:
+            print(f"  ✗ {dev} (cannot open)")
+            continue
+        reader.start()
+        # Wait up to 2s for the first frame
+        deadline = time.monotonic() + 2.0
+        frame = None
+        while time.monotonic() < deadline:
+            frame = reader.get_frame()
+            if frame is not None:
+                break
+            time.sleep(0.05)
+        if frame is not None:
+            readers.append(reader)
+            seen_ports.add(port)
+            print(f"  ✓ {dev} ({reader.width}×{reader.height})")
+        else:
+            reader.stop()
+            print(f"  ✗ {dev} (no frames)")
+
+    return readers
 
 
 def tile_frames(
@@ -165,22 +214,29 @@ def main() -> None:
     os.environ.setdefault("QT_QPA_FONTDIR", "/usr/share/fonts")
     args = parse_args()
 
+    import time
+
     if args.cameras is not None:
         devices = [f"/dev/video{i}" for i in args.cameras]
+        print(f"Opening cameras: {devices}")
+        readers = []
+        for dev in devices:
+            r = CameraReader(dev)
+            r.start()
+            readers.append(r)
+            print(f"  {dev}: {r.width}×{r.height}")
+        # Warm-up: wait for first frame from each camera
+        deadline = time.monotonic() + 3.0
+        while time.monotonic() < deadline:
+            if all(r.get_frame() is not None for r in readers):
+                break
+            time.sleep(0.05)
     else:
         print("Scanning for cameras...")
-        devices = detect_cameras()
+        readers = detect_cameras()
 
-    if not devices:
+    if not readers:
         sys.exit("No cameras found.")
-
-    print(f"Opening cameras: {[r.replace('/dev/video', '') for r in devices]}")
-    readers = []
-    for dev in devices:
-        r = CameraReader(dev)
-        r.start()
-        readers.append(r)
-        print(f"  {dev}: {r.width}×{r.height}")
 
     labels = [f"cam_{i}  ({r.device}  {r.width}x{r.height})" for i, r in enumerate(readers)]
 
