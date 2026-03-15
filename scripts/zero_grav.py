@@ -29,7 +29,7 @@ from i2rt.robots.utils import GripperType
 from i2rt.utils.utils import override_log_level
 
 # Resolve CAN channels + gripper types from USB serial mapping
-from resolve_leader_can import ArmInfo, resolve_arms
+from resolve_leader_can import ArmInfo, ensure_can_up, resolve_arms
 
 
 def parse_args() -> argparse.Namespace:
@@ -86,6 +86,9 @@ def main() -> None:
     arm_map = resolve_arms("leader_arms")
     for name, info in arm_map.items():
         logging.info(f"  {name} -> channel={info.channel}, gripper={info.gripper_type}")
+
+    # Bring CAN interfaces up (bitrate 1 Mbps); required before opening the bus
+    ensure_can_up(arm_map)
 
     # Decide which arms to launch
     arms_to_launch: List[str] = (

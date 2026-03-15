@@ -46,13 +46,28 @@ uv pip install -e .
 pip install -e lerobot/
 ```
 
-### 4. CAN auto-start on boot (one-time)
+### 4. CAN and udev (one-time)
+
+**Option A — Install device rules (add user to plugdev/video, optional udev rules):**
 
 ```bash
+cd /path/to/FoodManipLowLevel
 sudo sh devices/install_devices.sh
 ```
 
-Installs a udev rule that brings up all `can*` interfaces at 1 Mbps on plug-in.
+If you don’t have a `devices/rules/*.rules` directory, the script skips udev rule install and only adds your user to `plugdev` and `video`.
+
+**Option B — Install CAN rename rule (optional):**
+
+```bash
+sudo bash scripts/install_udev_rules.sh
+```
+
+**Bringing CAN up:** `zero_grav.py`, `teleop.py`, and `record.py` bring up the CAN interfaces (1 Mbps) automatically when you run them. If you see `Network is down` or need to bring up CAN manually (e.g. after replugging adapters), run:
+
+```bash
+sudo scripts/reset_all_can.sh
+```
 
 ---
 
