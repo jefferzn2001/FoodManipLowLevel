@@ -97,3 +97,6 @@ camcal/
 
 # VLA model repo (large, external dependency)
 food_manipulation/
+
+# VLA test output
+vla_test_output/

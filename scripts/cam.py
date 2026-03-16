@@ -91,7 +91,33 @@ class CameraReader:
         self._cap.release()
 
 
-def detect_cameras() -> List[CameraReader]:
+def _reset_usb_device(dev_path: str) -> None:
+    """Reset the USB device backing a /dev/videoN node.
+
+    This clears stuck V4L2 state without needing to physically unplug
+    the camera. Requires write access to the USB device (usually root).
+    """
+    import fcntl
+    USBDEVFS_RESET = 0x5514
+    try:
+        sys_path = os.path.realpath(f"/sys/class/video4linux/{os.path.basename(dev_path)}/device")
+        # Walk up to find the USB device node
+        while sys_path and not os.path.exists(os.path.join(sys_path, "busnum")):
+            sys_path = os.path.dirname(sys_path)
+        if not sys_path:
+            return
+        busnum = open(os.path.join(sys_path, "busnum")).read().strip()
+        devnum = open(os.path.join(sys_path, "devnum")).read().strip()
+        usb_dev = f"/dev/bus/usb/{int(busnum):03d}/{int(devnum):03d}"
+        with open(usb_dev, "w") as f:
+            fcntl.ioctl(f, USBDEVFS_RESET, 0)
+        import time
+        time.sleep(0.5)
+    except (OSError, PermissionError, FileNotFoundError, ValueError):
+        pass
+
+
+def detect_cameras(retry_with_reset: bool = True) -> List[CameraReader]:
     """Detect cameras and return started CameraReader instances.
 
     Each physical USB camera typically creates two /dev/videoN nodes
@@ -99,8 +125,8 @@ def detect_cameras() -> List[CameraReader]:
     is metadata. We try both and keep whichever actually delivers frames.
     Uses /dev/v4l/by-path/ for stable ordering by physical USB port.
 
-    Returns CameraReader instances directly (already started) to avoid
-    the probe-then-reopen pattern that causes "No signal" on some cameras.
+    If no cameras are found on the first pass, attempts a USB reset and
+    retries once (avoids needing to physically replug).
     """
     import time
 
@@ -156,6 +182,14 @@ def detect_cameras() -> List[CameraReader]:
         else:
             reader.stop()
             print(f"  ✗ {dev} (no frames)")
+
+    # If nothing found, try USB reset and retry once
+    if not readers and retry_with_reset and candidates:
+        print("\nNo cameras responded. Attempting USB reset...")
+        for dev in candidates:
+            _reset_usb_device(dev)
+        time.sleep(1.0)
+        return detect_cameras(retry_with_reset=False)
 
     return readers
 
@@ -240,6 +274,25 @@ def main() -> None:
 
     labels = [f"cam_{i}  ({r.device}  {r.width}x{r.height})" for i, r in enumerate(readers)]
 
+    # Ensure cameras are always released, even on Ctrl-C or crash
+    import signal
+
+    def _cleanup(signum=None, frame=None):
+        for r in readers:
+            try:
+                r.stop()
+            except Exception:
+                pass
+        try:
+            cv2.destroyAllWindows()
+        except Exception:
+            pass
+        if signum is not None:
+            sys.exit(0)
+
+    signal.signal(signal.SIGINT, _cleanup)
+    signal.signal(signal.SIGTERM, _cleanup)
+
     win = "Cameras — press Q or ESC to quit"
     with _quiet_stderr():
         cv2.namedWindow(win, cv2.WINDOW_NORMAL)
@@ -252,7 +305,6 @@ def main() -> None:
         while True:
             frames = [r.get_frame() for r in readers]
 
-            # Get current window size for tiling
             rect = cv2.getWindowImageRect(win)
             disp_w = max(rect[2], 640)
             disp_h = max(rect[3], 480)
@@ -261,12 +313,10 @@ def main() -> None:
             cv2.imshow(win, canvas)
 
             key = cv2.waitKey(30) & 0xFF
-            if key in (ord('q'), ord('Q'), 27):  # Q or ESC
+            if key in (ord('q'), ord('Q'), 27):
                 break
     finally:
-        cv2.destroyAllWindows()
-        for r in readers:
-            r.stop()
+        _cleanup()
 
 
 if __name__ == "__main__":
